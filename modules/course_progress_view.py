@@ -591,14 +591,22 @@ def show_cooked_list():
                 cooked_at = parse_dt(p["cooked_at"])
                 cooked_at_jst = to_jst(cooked_at)
 
-                # メイン枠なら、予約ごとのメイン料理名で上書き
-                display_name = item["item_name"]
-                if item["item_name"] == "メイン":
-                    main_choice = resv.get("main_choice")
-                    if main_choice:
-                        display_name = main_choice
+                # ★ メイン詳細（main_detail）＆数量(quantity)に対応
+                detail = p.get("main_detail")
+                qty = p.get("quantity", 1)
 
-                # 安全のため None チェック
+                if item["item_name"] == "メイン":
+                    base_name = detail or "メイン"
+                else:
+                    base_name = item["item_name"]
+
+                # 数量が2以上なら ×で表示
+                if qty and qty > 1:
+                    display_name = f"{base_name} ×{qty}"
+                else:
+                    display_name = base_name
+
+                # 時間表示
                 time_label = cooked_at_jst.strftime('%H:%M') if cooked_at_jst else "--:--"
 
                 st.markdown(
@@ -768,12 +776,19 @@ def show_served_list():
                 served_at = parse_dt(p["served_at"])
                 served_at_jst = to_jst(served_at)
 
-                # メイン枠なら、予約ごとのメイン料理名で上書き
-                display_name = item["item_name"]
+                # ★ メイン詳細（main_detail）＆数量(quantity)に対応
+                detail = p.get("main_detail")
+                qty = p.get("quantity", 1)
+
                 if item["item_name"] == "メイン":
-                    main_choice = resv.get("main_choice")
-                    if main_choice:
-                        display_name = main_choice
+                    base_name = detail or "メイン"
+                else:
+                    base_name = item["item_name"]
+
+                if qty and qty > 1:
+                    display_name = f"{base_name} ×{qty}"
+                else:
+                    display_name = base_name
 
                 time_label = served_at_jst.strftime('%H:%M') if served_at_jst else "--:--"
 
