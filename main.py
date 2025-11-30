@@ -30,7 +30,7 @@ def main():
         [
             "1. コース進行ボード",
             "2. 調理済み一覧",
-            "3. 配膳済み一覧",
+            # "3. 配膳済み一覧",
             # "4. コース予約登録",
             # "5. コースマスタ管理",
         ]
@@ -40,8 +40,8 @@ def main():
         course_progress_view.show_board()
     elif menu == "2. 調理済み一覧":
         course_progress_view.show_cooked_list()
-    elif menu == "3. 配膳済み一覧":
-        course_progress_view.show_served_list()
+    # elif menu == "3. 配膳済み一覧":
+    #     course_progress_view.show_served_list()
     # elif menu == "4. コース予約登録":
     #     course_reservation.show()
     # elif menu == "5. コースマスタ管理":
