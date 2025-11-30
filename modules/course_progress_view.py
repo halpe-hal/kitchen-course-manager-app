@@ -1,7 +1,7 @@
 # modules/course_progress_view.py
 
 import streamlit as st
-from datetime import datetime, date, time, timedelta, timezone  # ← ここで timezone も追加
+from datetime import datetime, date, time, timedelta, timezone
 from collections import Counter
 from streamlit_autorefresh import st_autorefresh
 from typing import Optional
@@ -68,6 +68,7 @@ def parse_dt(dt_str: str):
             base = base[:19]  # "YYYY-MM-DDTHH:MM:SS" まで
         return datetime.fromisoformat(base)
 
+
 def to_jst(dt: Optional[datetime]):
     if dt is None:
         return None
@@ -76,6 +77,7 @@ def to_jst(dt: Optional[datetime]):
         dt = dt.replace(tzinfo=timezone.utc)
     # JST に変換して naive に戻す
     return dt.astimezone(timezone(timedelta(hours=9))).replace(tzinfo=None)
+
 
 def get_now_jst():
     return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=9)))
@@ -91,33 +93,48 @@ def set_reservation_status(reservation_id: str, status: str):
         st.error(f"予約ステータスの更新に失敗しました: {e}")
 
 
+# ★ 調理開始フラグを更新
+def set_started_flag(progress_id: str, flag: bool):
+    try:
+        supabase.table("course_progress").update(
+            {"is_started": flag}
+        ).eq("id", progress_id).execute()
+    except Exception as e:
+        st.error(f"調理開始フラグの更新に失敗しました: {e}")
+
+
 # 調理フラグを更新（True / False）
 def set_cooked_flag(progress_id: str, flag: bool):
+    """
+    キッチン画面では「調理済み」を押したら is_cooked を立てる。
+    「調理済みを戻す」で is_cooked / is_started を両方下げる。
+    """
     try:
-        payload = {"is_cooked": flag}
-
         if flag:
-            # 調理済みにするときは cooked_at も現在時刻でセット
-            payload["cooked_at"] = datetime.now(timezone.utc).isoformat()
+            payload = {
+                "is_cooked": True,
+                "cooked_at": datetime.now(timezone.utc).isoformat(),
+            }
         else:
-            # 戻すときは cooked_at をクリア
-            payload["cooked_at"] = None
+            payload = {
+                "is_cooked": False,
+                "cooked_at": None,
+                "is_started": False,  # 調理開始もリセット
+            }
 
         supabase.table("course_progress").update(payload).eq("id", progress_id).execute()
     except Exception as e:
         st.error(f"調理フラグの更新に失敗しました: {e}")
 
 
-# 配膳フラグを更新（True / False）
+# 配膳フラグを更新（True / False）※今後この画面では使用しない（互換用に残すだけ）
 def set_served_flag(progress_id: str, flag: bool):
     try:
         payload = {"is_served": flag}
 
         if flag:
-            # 配膳済みにするときは served_at も現在時刻でセット
             payload["served_at"] = datetime.now(timezone.utc).isoformat()
         else:
-            # 戻すときは served_at をクリア
             payload["served_at"] = None
 
         supabase.table("course_progress").update(payload).eq("id", progress_id).execute()
@@ -176,6 +193,7 @@ def update_reservation_arrived(reservation_id):
     ).eq("id", reservation_id).execute()
 
 
+# 既存ヘルパー（互換用）
 def update_cooked(progress_id):
     now_iso = datetime.now(timezone.utc).isoformat()
     supabase.table("course_progress").update(
@@ -192,12 +210,6 @@ def parse_local_scheduled_time(dt_str: str) -> Optional[datetime]:
     """
     course_progress.scheduled_time を
     「タイムゾーン無視のローカル時刻」として解釈するためのパーサー。
-
-    例:
-      "2025-11-24T18:10:00+00:00" → 2025-11-24 18:10:00
-      "2025-11-24T18:10:00+09:00" → 2025-11-24 18:10:00
-      "2025-11-24T18:10:00Z"      → 2025-11-24 18:10:00
-      "2025-11-24T18:10:00"       → 2025-11-24 18:10:00
     """
     if not dt_str:
         return None
@@ -228,7 +240,6 @@ def show_board():
         )
 
     if st.session_state["auto_refresh_board"]:
-        # 2000ms = 2秒ごとにスクリプトを再実行（画面はほぼそのまま）
         st_autorefresh(interval=5000, key="board_autorefresh_counter")
 
     col_date, col_info = st.columns([1, 1])
@@ -273,41 +284,35 @@ def show_board():
     item_ids = list({p["course_item_id"] for p in progress_rows})
     item_map = fetch_items_for_ids(item_ids)
 
-    # 予約ごとの progress 集計
-    #   has_any_progress: キッチン対象の商品が1つでもある予約
-    #   has_unserved:     未配膳のキッチン商品が1つでも残っている予約
-    #   progress_by_res:  未配膳のキッチン商品だけを予約ごとにまとめたもの（表示用）
-    progress_by_res = {}
-    has_any_progress = set()
-    has_unserved = set()
-
+    # キッチン専用：作業場所が「キッチン」または「両方」の商品だけを対象にする
+    kitchen_progress_rows = []
     for p in progress_rows:
-        rid = p["reservation_id"]
         item = item_map.get(p["course_item_id"])
         if not item:
             continue
-
-        # ★ キッチン専用ボード：
-        # making_place が「キッチン」か「両方」の item のみ扱う
         making_place = item.get("making_place") or "キッチン"
-        if making_place not in ("キッチン", "両方"):
-            continue
+        if making_place in ("キッチン", "両方"):
+            kitchen_progress_rows.append(p)
 
-        has_any_progress.add(rid)
+    # 予約ごとの progress 集計（キッチン対象のみ）
+    progress_by_res = {}
+    has_uncooked = set()
 
-        if not p.get("is_served", False):
-            has_unserved.add(rid)
+    # ★ 未調理（is_cooked=False）のものだけボードに載せる
+    for p in kitchen_progress_rows:
+        if not p.get("is_cooked", False):
+            rid = p["reservation_id"]
             progress_by_res.setdefault(rid, []).append(p)
+            has_uncooked.add(rid)
 
-    # ★ キッチン視点での「アクティブ予約」
+    # キッチン対象の商品で「未調理が1つでも残っている予約」だけをアクティブ表示
     active_reservations = [
         r for r in reservations
-        if (r["id"] not in has_any_progress) or (r["id"] in has_unserved)
+        if r["id"] in has_uncooked
     ]
 
-
     if not active_reservations:
-        st.info("配膳待ちのキッチン商品はありません。")
+        st.info("調理待ちのキッチン商品はありません。")
         return
 
     # アクティブ予約数に合わせて横幅を再計算（上書き）
@@ -385,12 +390,12 @@ def show_board():
             st.markdown("---")
 
             if not items_for_res:
-                st.caption("※ この予約には、表示可能なピザ商品がありません。")
+                st.caption("※ この予約には、表示可能なキッチン商品がありません。")
                 continue
 
-            # ===== 各商品の行（未配膳のものだけ） =====
             total_items = len(items_for_res)
 
+            # ===== 各商品の行（未調理のものだけ） =====
             for row_idx, p in enumerate(items_for_res):
                 item = item_map.get(p["course_item_id"])
                 if not item:
@@ -402,8 +407,9 @@ def show_board():
                     continue
                 time_str = sched_time.strftime('%H:%M')
 
+                is_started = p.get("is_started", False)
                 is_cooked = p.get("is_cooked", False)
-                is_served = p.get("is_served", False)  # ここは全部 False のはずだが念のため
+                is_served = p.get("is_served", False)  # 一応
 
                 # ★ 予定時刻から3分以上たっても未配膳なら「遅延」判定
                 now_dt = get_now_jst().replace(tzinfo=None)  # JST 現在時刻（naive）
@@ -436,8 +442,6 @@ def show_board():
                                 continue
                             display_name = main_choice
 
-
-
                 # 商品見出し：時間(赤)＋商品名
                 st.markdown(
                     f"""
@@ -456,37 +460,44 @@ def show_board():
                     unsafe_allow_html=True
                 )
 
-                # ボタン行
+                # ==== ボタン行 ====
                 c1, c2 = st.columns(2)
+
+                # 左：調理開始の制御
                 with c1:
-                    if not is_cooked:
-                        if st.button("調理済み", key=f"cook_{idx}_{row_idx}_{p['id']}"):
-                            set_cooked_flag(p["id"], True)
+                    if (not is_started) and (not is_cooked):
+                        if st.button("調理開始", key=f"start_{idx}_{row_idx}_{p['id']}"):
+                            set_started_flag(p["id"], True)
                             st.rerun()
-                    else:
+                    elif is_started and (not is_cooked):
+                        # 調理中バッジ＋戻すボタン
                         st.markdown(
                             """
                             <div style="
-                                background-color:#e6f3ff;
-                                color:#004a99;
-                                padding:12px 20px;
+                                background-color:#fff7e6;
+                                color:#c27b00;
+                                padding:12px 36px;
                                 border-radius:6px;
                                 font-weight:600;
                                 width:fit-content;
                             ">
-                                調理済み
+                                調理中
                             </div>
                             """,
                             unsafe_allow_html=True
                         )
-                        if st.button("調理済みを戻す", key=f"undo_cook_{idx}_{row_idx}_{p['id']}"):
-                            set_cooked_flag(p["id"], False)
+                        if st.button("調理開始を戻す", key=f"undo_start_{idx}_{row_idx}_{p['id']}"):
+                            set_started_flag(p["id"], False)
                             st.rerun()
+                    else:
+                        # is_cooked=True のものはここには来ない想定
+                        pass
 
+                # 右：調理済みボタン
                 with c2:
-                    if not is_served:
-                        if st.button("配膳済み", key=f"serve_{idx}_{row_idx}_{p['id']}"):
-                            update_served(p["id"])
+                    if not is_cooked:
+                        if st.button("調理済み", key=f"cook_{idx}_{row_idx}_{p['id']}"):
+                            set_cooked_flag(p["id"], True)
                             st.rerun()
 
                 # 商品と商品の間の区切り線
@@ -497,8 +508,7 @@ def show_board():
                     )
 
 
-
-# ===== 調理済み・配膳済み一覧 =====
+# ===== 調理済み一覧 =====
 
 def show_cooked_list():
     cleanup_old_data()
@@ -556,12 +566,18 @@ def show_cooked_list():
     # 商品マスタ
     item_map = fetch_items_for_ids(item_ids)
 
-    # 予約ごとに progress をまとめる
+    # 予約ごとに progress をまとめる（キッチン or 両方のみ）
     progress_by_res = {}
     for r in rows:
+        item = item_map.get(r["course_item_id"])
+        if not item:
+            continue
+        making_place = item.get("making_place") or "キッチン"
+        if making_place not in ("キッチン", "両方"):
+            continue
         progress_by_res.setdefault(r["reservation_id"], []).append(r)
 
-    # 「調理済みが1つでもある予約」のみに絞る
+    # 「調理済み（キッチン対象）が1つでもある予約」のみに絞る
     reservations = [r for r in reservations if r["id"] in progress_by_res]
 
     # 予約を「予約時間 → テーブル順」で並べ替え（進行ボードと同じ）
@@ -644,7 +660,7 @@ def show_cooked_list():
                 cooked_at = parse_dt(p["cooked_at"])
                 cooked_at_jst = to_jst(cooked_at)
 
-                # ★ メイン詳細（main_detail）＆数量(quantity)に対応
+                # メイン詳細（main_detail）＆数量(quantity)に対応
                 detail = p.get("main_detail")
                 qty = p.get("quantity", 1)
 
@@ -676,196 +692,12 @@ def show_cooked_list():
                     unsafe_allow_html=True
                 )
 
-
-                # 区切り線
-                if row_idx < total_items - 1:
-                    st.markdown(
-                        "<hr style='margin:8px 0; border:none; border-top:1px solid #333333;'/>",
-                        unsafe_allow_html=True
-                    )
-
-
-def show_served_list():
-    cleanup_old_data()
-    st.subheader("配膳済み一覧")
-
-    if "auto_refresh_cooked" not in st.session_state:
-        st.session_state["auto_refresh_cooked"] = True
-
-    col_left, col_right = st.columns([3, 1])
-    with col_right:
-        st.session_state["auto_refresh_cooked"] = st.checkbox(
-            "自動更新",
-            value=st.session_state["auto_refresh_cooked"],
-            key="chk_auto_refresh_cooked",
-        )
-
-    if st.session_state["auto_refresh_cooked"]:
-        st_autorefresh(interval=5000, key="cooked_autorefresh_counter")
-
-    target_date = st.date_input("対象日（配膳日）", value=get_today_jst(), key="served_date")
-    start_dt = datetime.combine(target_date, time(0, 0, 0))
-    end_dt = datetime.combine(target_date + timedelta(days=1), time(0, 0, 0))
-
-    # この日に「配膳済み」になったものだけ取得
-    res = (
-        supabase.table("course_progress")
-        .select("*")
-        .eq("is_served", True)
-        .gte("served_at", start_dt.isoformat())
-        .lt("served_at", end_dt.isoformat())
-        .order("scheduled_time", desc=False)
-        .execute()
-    )
-    rows = res.data or []
-    if not rows:
-        st.info("該当日の配膳済みデータはありません。")
-        return
-
-    # 関連する予約・商品情報を取得
-    reservation_ids = list({r["reservation_id"] for r in rows})
-    item_ids = list({r["course_item_id"] for r in rows})
-
-    # 予約情報
-    res_resv = (
-        supabase.table("course_reservations")
-        .select("id, reserved_at, guest_name, guest_count, table_no, main_choice")
-        .in_("id", reservation_ids)
-        .execute()
-    )
-    reservations = res_resv.data or []
-    if not reservations:
-        st.info("該当する予約データがありません。")
-        return
-
-    # 商品マスタ
-    item_map = fetch_items_for_ids(item_ids)
-
-    # 予約ごとに progress をまとめる
-    progress_by_res = {}
-    for r in rows:
-        progress_by_res.setdefault(r["reservation_id"], []).append(r)
-
-    # 「配膳済みが1つでもある予約」のみに絞る
-    reservations = [r for r in reservations if r["id"] in progress_by_res]
-
-    # 予約を「予約時間 → テーブル順」で並べ替え（進行ボードと同じ）
-    def sort_key_resv(r):
-        dt = datetime.fromisoformat(r["reserved_at"])
-        table = r.get("table_no") or ""
-        table_idx = TABLE_ORDER.get(table, 999)
-        return (dt, table_idx)
-
-    reservations = sorted(reservations, key=sort_key_resv)
-
-    # 横スクロールできるように幅を調整（進行ボードと同じ考え方）
-    per_card_width = 300
-    width_px = max(300, per_card_width * len(reservations))
-    st.markdown(
-        f"""
-        <style>
-        .block-container {{
-            min-width: {width_px}px;
-            margin-left: 0 !important;
-            margin-right: auto !important;
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # 予約単位でカラムを作成（左から順番に並ぶ）
-    cols = st.columns(len(reservations))
-
-    for idx, resv in enumerate(reservations):
-        with cols[idx]:
-            resv_time = datetime.fromisoformat(resv["reserved_at"])
-            guest_name = (resv.get("guest_name") or "お名前未入力")
-            guest_count = resv.get("guest_count") or "-"
-            table_no = resv.get("table_no") or "-"
-
-            # 予約ヘッダー（時間＋名前＋人数＋テーブル）※ステータス表記なし
-            st.markdown(
-                f"""
-                <div style="
-                    background-color:#f2f2f2;
-                    border-radius:10px;
-                    padding:10px 4px;
-                    text-align:center;
-                    font-weight:600;
-                    font-size:18px;
-                    margin-bottom:8px;
-                ">
-                    <div style="color:#d9534f; font-weight:700; font-size:20px;">
-                        {resv_time.strftime('%H:%M')}
-                    </div>
-                    <div>
-                        {guest_name} 様（{guest_count} 名）
-                    </div>
-                    <div style="font-size:20px; color:#d9534f; margin-left:2px; font-weight:bold;">
-                        {table_no}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            items_for_res = sorted(
-                progress_by_res.get(resv["id"], []),
-                key=lambda x: x["scheduled_time"],
-            )
-            if not items_for_res:
-                st.caption("※ この予約の配膳済み商品はありません。")
-                continue
-
-            total_items = len(items_for_res)
-
-            # この予約で「配膳済み」になっている商品だけを表示
-            for row_idx, p in enumerate(items_for_res):
-                item = item_map.get(p["course_item_id"])
-                if not item:
-                    continue
-
-                served_at = parse_dt(p["served_at"])
-                served_at_jst = to_jst(served_at)
-
-                # ★ メイン詳細（main_detail）＆数量(quantity)に対応
-                detail = p.get("main_detail")
-                qty = p.get("quantity", 1)
-
-                if item["item_name"] == "メイン":
-                    base_name = detail or "メイン"
-                else:
-                    base_name = item["item_name"]
-
-                if qty and qty > 1:
-                    display_name = f"{base_name} ×{qty}"
-                else:
-                    display_name = base_name
-
-                time_label = served_at_jst.strftime('%H:%M') if served_at_jst else "--:--"
-
-                st.markdown(
-                    f"""
-                    <div style="margin-top:4px; margin-bottom:4px;">
-                        <div style="font-size:16px; font-weight:600;">
-                            <span style="color:#d9534f; font-weight:700; margin-right:4px;">
-                                {time_label}
-                            </span>
-                            <span>{display_name}</span>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-
-                # ★ここで「配膳済みを戻す」ボタン（→ 進行ボードへ戻す）
+                # ★ 調理済みを戻す → 進行ボードに戻す
                 if st.button(
-                    "配膳済みを戻す",
-                    key=f"undo_served_{idx}_{row_idx}_{p['id']}",
+                    "調理済みを戻す",
+                    key=f"undo_cooked_{idx}_{row_idx}_{p['id']}",
                 ):
-                    set_served_flag(p["id"], False)
+                    set_cooked_flag(p["id"], False)
                     st.rerun()
 
                 # 区切り線
