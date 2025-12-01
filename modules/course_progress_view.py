@@ -386,7 +386,7 @@ def show_board():
                         {resv_time.strftime('%H:%M')}
                     </div>
                     <div>
-                        {guest_name} 様（{guest_count_label} 名）
+                        {guest_name} （{guest_count_label} 名）
                     </div>
                     <div style="
                         font-weight:700;
@@ -668,7 +668,7 @@ def show_cooked_list():
                         {resv_time.strftime('%H:%M')}
                     </div>
                     <div>
-                        {guest_name} 様（{guest_count_label} 名）
+                        {guest_name} （{guest_count_label} 名）
                     </div>
                     <div style="font-size:20px; color:#d9534f; margin-left:2px; font-weight:bold;">
                         {resv.get('table_no') or '-'}
