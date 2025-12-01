@@ -82,6 +82,38 @@ def to_jst(dt: Optional[datetime]):
 def get_now_jst():
     return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=9)))
 
+def sort_reservation_for_board(resv: dict):
+    """
+    進行ボード用の並び順:
+    1) status が "arrived" の予約を先頭（arrived_flag=0）
+    2) それ以外（未来店）を後ろ（arrived_flag=1）
+    その中では「予約時間 → テーブル番号順」
+    """
+    status = (resv.get("status") or "reserved").lower()
+    arrived_flag = 0 if status == "arrived" else 1
+    dt = datetime.fromisoformat(resv["reserved_at"])
+    table = resv.get("table_no") or ""
+    table_idx = TABLE_ORDER.get(table, 999)
+    return (arrived_flag, dt, table_idx)
+
+
+
+# ★追加：人数タグ付与ヘルパー（3名以上 & メイン以外を赤文字で強調）
+def add_guest_prefix_if_needed(name: str, guest_count: Optional[int], is_main: bool) -> str:
+    """
+    3名様以上のとき、メイン以外の商品名の先頭に【3名】のような人数タグを付ける（赤文字）。
+    """
+    if not guest_count or guest_count < 3:
+        return name
+    if is_main:
+        return name
+
+    # すでに同じ人数タグが含まれていれば二重付与しない
+    if f"【{guest_count}名】" in name:
+        return name
+
+    return f"<span style='color:#d9534f; font-weight:700;'>【{guest_count}名】</span>{name}"
+
 
 # 予約ステータスを更新（reserved / arrived など）
 def set_reservation_status(reservation_id: str, status: str):
@@ -253,14 +285,9 @@ def show_board():
         st.info("該当日のコース予約はありません。")
         return
 
-    # 時間 → テーブル順で並べ替え
-    def sort_key_resv(r):
-        dt = datetime.fromisoformat(r["reserved_at"])
-        table = r.get("table_no") or ""
-        table_idx = TABLE_ORDER.get(table, 999)
-        return (dt, table_idx)
+    # ★ 来店済み優先 + 時間 → テーブル順
+    reservations = sorted(reservations, key=sort_reservation_for_board)
 
-    reservations = sorted(reservations, key=sort_key_resv)
 
     # ここでコンテナの横幅を「予約数 × 300px」で決める（初期値）
     per_card_width = 300
@@ -341,7 +368,8 @@ def show_board():
 
             # ===== 見出し：時間 / 名前＋人数 / テーブル =====
             guest_name = (resv.get("guest_name") or "お名前未入力")
-            guest_count = resv.get("guest_count") or "-"
+            guest_count_value = resv.get("guest_count")
+            guest_count_label = guest_count_value if guest_count_value is not None else "-"
             table_label = f"{resv.get('table_no') or '-'}"
             st.markdown(
                 f"""
@@ -358,7 +386,7 @@ def show_board():
                         {resv_time.strftime('%H:%M')}
                     </div>
                     <div>
-                        {guest_name} 様（{guest_count} 名）
+                        {guest_name} 様（{guest_count_label} 名）
                     </div>
                     <div style="
                         font-weight:700;
@@ -421,9 +449,10 @@ def show_board():
                     container_style += " background-color:#ffe5e5; border-radius:8px; padding:4px 6px;"
 
                 display_name = item["item_name"]
+                is_main_item = (item["item_name"] == "メイン")
 
                 # メイン枠なら、予約ごとのメイン詳細で上書き
-                if item["item_name"] == "メイン":
+                if is_main_item:
                     detail = p.get("main_detail")
                     qty = p.get("quantity", 1)
 
@@ -441,6 +470,13 @@ def show_board():
                             if "ピザ" in main_choice:
                                 continue
                             display_name = main_choice
+
+                # ★ ここで人数タグを付与（3名様以上 & メイン以外）
+                display_name = add_guest_prefix_if_needed(
+                    display_name,
+                    guest_count_value,
+                    is_main_item,
+                )
 
                 # 商品見出し：時間(赤)＋商品名
                 st.markdown(
@@ -612,7 +648,8 @@ def show_cooked_list():
         with cols[idx]:
             resv_time = datetime.fromisoformat(resv["reserved_at"])
             guest_name = (resv.get("guest_name") or "お名前未入力")
-            guest_count = resv.get("guest_count") or "-"
+            guest_count_value = resv.get("guest_count")
+            guest_count_label = guest_count_value if guest_count_value is not None else "-"
             table_no = resv.get("table_no") or "-"
 
             # 予約ヘッダー（時間＋名前＋人数）※来店済み表記は無し
@@ -631,7 +668,7 @@ def show_cooked_list():
                         {resv_time.strftime('%H:%M')}
                     </div>
                     <div>
-                        {guest_name} 様（{guest_count} 名）
+                        {guest_name} 様（{guest_count_label} 名）
                     </div>
                     <div style="font-size:20px; color:#d9534f; margin-left:2px; font-weight:bold;">
                         {resv.get('table_no') or '-'}
@@ -664,7 +701,8 @@ def show_cooked_list():
                 detail = p.get("main_detail")
                 qty = p.get("quantity", 1)
 
-                if item["item_name"] == "メイン":
+                is_main_item = (item["item_name"] == "メイン")
+                if is_main_item:
                     base_name = detail or "メイン"
                 else:
                     base_name = item["item_name"]
@@ -674,6 +712,13 @@ def show_cooked_list():
                     display_name = f"{base_name} ×{qty}"
                 else:
                     display_name = base_name
+
+                # ★ 人数タグ付与（3名様以上 & メイン以外）
+                display_name = add_guest_prefix_if_needed(
+                    display_name,
+                    guest_count_value,
+                    is_main_item,
+                )
 
                 # 時間表示
                 time_label = cooked_at_jst.strftime('%H:%M') if cooked_at_jst else "--:--"
